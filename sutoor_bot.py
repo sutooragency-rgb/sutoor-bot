@@ -26,7 +26,6 @@ def get_latest_links(category_url):
         for a_tag in soup.find_all('a', href=True):
             full_url = urljoin(category_url, a_tag['href'])
             parsed = urlparse(full_url)
-            # التأكد أن الرابط يتبع لنفس الموقع وأنه طويل بما يكفي ليكون مقالاً
             if parsed.netloc == base_domain and len(parsed.path) > 15:
                 if full_url not in links:
                     links.append(full_url)
@@ -67,18 +66,14 @@ def process_and_publish():
         category_url = src['source_url']
         cat_id = src['category_id']
         
-        # تخطي روابط فيسبوك تلقائياً
         if "facebook.com" in category_url:
             print(f"⚠️ جاري تخطي رابط فيسبوك (غير مدعوم برمجياً): {category_url}")
             continue
             
-        # 1. جلب الروابط من القسم
         article_links = get_latest_links(category_url)
         
         for url in article_links:
             print(f"📡 فحص الرابط: {url}")
-            
-            # 2. سحب المحتوى والصورة
             raw_text, image_url = extract_news_content(url)
             
             if len(raw_text) < 150:
@@ -99,7 +94,6 @@ def process_and_publish():
             
             try:
                 print("🧠 جاري التحرير بالذكاء الاصطناعي...")
-                # استخدام الموديل الجديد
                 response = client.models.generate_content(
                     model='gemini-2.5-flash',
                     contents=prompt,
