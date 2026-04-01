@@ -9,20 +9,20 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: جلب ملفات المستودع
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: تجهيز بيئة بايثون
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: تثبيت المكتبات الحديثة
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 google-genai
 
-      - name: تشغيل المحرر الآلي لوكالة سطور
+      - name: Run Sutoor Auto Publisher
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SUTOOR_SECRET: ${{ secrets.SUTOOR_SECRET }}
