@@ -1,96 +1,128 @@
 import os
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 import google.generativeai as genai
 
-# جلب المفاتيح السرية التي قمت بتخزينها
 API_KEY_GEMINI = os.environ.get("GEMINI_API_KEY")
 SECRET_KEY = os.environ.get("SUTOOR_SECRET")
 
-# روابط وكالة سطور
 SITE_API_URL = "https://sutoor.news/news_api/auto_publish.php"
 SOURCES_URL = f"https://sutoor.news/news_api/get_bot_sources.php?key={SECRET_KEY}"
 
-# إعداد الذكاء الاصطناعي
 genai.configure(api_key=API_KEY_GEMINI)
-model = genai.GenerativeModel('gemini-1.5-flash') # نستخدم الموديل الأسرع والأكثر كفاءة
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-def fetch_news_text(url):
-    """دالة لسحب النص من الروابط"""
+def get_latest_links(category_url):
+    """صيد الروابط من صفحة القسم"""
+    print(f"🔍 جاري مسح صفحة القسم: {category_url}")
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        response = requests.get(url, headers=headers, timeout=15)
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(category_url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.content, 'html.parser')
-        # جلب جميع الفقرات النصية في المقال
+        base_domain = urlparse(category_url).netloc
+        
+        links = []
+        for a_tag in soup.find_all('a', href=True):
+            full_url = urljoin(category_url, a_tag['href'])
+            parsed = urlparse(full_url)
+            # التأكد أن الرابط يتبع لنفس الموقع وأنه طويل بما يكفي ليكون مقالاً
+            if parsed.netloc == base_domain and len(parsed.path) > 15:
+                if full_url not in links:
+                    links.append(full_url)
+        return links[:4] # سحب أحدث 4 روابط فقط لتجنب الضغط
+    except Exception as e:
+        print(f"❌ خطأ في مسح القسم: {e}")
+        return []
+
+def extract_news_content(article_url):
+    """سحب النص والصورة من الخبر"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(article_url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # استخراج الصورة الرسمية للخبر
+        image_url = "https://sutoor.news/assets/images/default.jpg"
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            image_url = og_image["content"]
+
+        # استخراج النص
         paragraphs = soup.find_all('p')
         text = " ".join([p.get_text() for p in paragraphs])
-        return text.strip()
+        
+        return text.strip(), image_url
     except Exception as e:
-        print(f"❌ خطأ في سحب الرابط {url}: {e}")
-        return ""
+        return "", ""
 
 def process_and_publish():
-    print("🤖 جاري الاتصال بوكالة سطور لجلب روابط المصادر...")
+    print("🤖 الصياد الآلي لوكالة سطور بدأ العمل...")
     try:
         response = requests.get(SOURCES_URL)
         sources = response.json()
-        if not sources:
-            print("⚠️ لا توجد روابط مفعلة في لوحة التحكم حتى الآن.")
-            return
     except Exception as e:
-        print("❌ فشل الاتصال بلوحة تحكم الوكالة:", e)
+        print("❌ فشل الاتصال بقاعدة البيانات.")
         return
 
     for src in sources:
-        url = src['source_url']
-        category_id = src['category_id']
+        category_url = src['source_url']
+        cat_id = src['category_id']
         
-        print(f"📡 جاري قراءة الخبر من: {url}")
-        raw_text = fetch_news_text(url)
+        # 1. جلب الروابط من القسم
+        article_links = get_latest_links(category_url)
         
-        if len(raw_text) < 150:
-            print("⚠️ النص قصير جداً أو لم يتم العثور على خبر واضح، سيتم تخطيه.")
-            continue
-
-        prompt = f"""
-        أنت محرر صحفي محترف تعمل في (وكالة سطور الإخبارية).
-        قم بإعادة صياغة هذا الخبر بشكل حصري واحترافي، مع الالتزام التام بالشروط التالية:
-        1. اكتب عنواناً رئيسياً جذاباً ومختصراً جداً في السطر الأول فقط.
-        2. ابدأ السطر الثاني بالديباجة التالية بالضبط: "سطور الإخبارية / [استنتج مكان الحدث أو اكتب بغداد]"
-        3. اكتب تفاصيل الخبر بأسلوب صحفي رصين وخالي من الحشو.
-        4. يُمنع منعاً باتاً وضع أي روابط، أو ذكر اسم الوكالة الأصلية التي نُقل منها الخبر.
-        5. افصل بين العنوان والديباجة والنص بأسطر فارغة.
-
-        النص الخام:
-        {raw_text[:4000]}
-        """
-        
-        try:
-            print("🧠 يتم الآن إعادة صياغة الخبر بالذكاء الاصطناعي...")
-            edited_news = model.generate_content(prompt).text
+        for url in article_links:
+            print(f"📡 فحص الرابط: {url}")
             
-            # فصل العنوان عن بقية الخبر
-            parts = edited_news.strip().split('\n', 1)
-            title = parts[0].replace('*', '').strip()
-            content = parts[1].strip() if len(parts) > 1 else edited_news
-
-            payload = {
-                "api_key": SECRET_KEY,
-                "title": title,
-                "content": content,
-                "category_id": category_id,
-                "image_url": "https://sutoor.news/assets/images/default.jpg" # صورة مؤقتة
-            }
+            # 2. سحب المحتوى والصورة
+            raw_text, image_url = extract_news_content(url)
             
-            # إرسال الخبر المحرر إلى الموقع
-            pub_response = requests.post(SITE_API_URL, json=payload)
-            if pub_response.status_code == 201:
-                print(f"✅ تم النشر بنجاح: {title}")
-            else:
-                print(f"❌ خطأ أثناء النشر في الموقع: {pub_response.text}")
+            if len(raw_text) < 150:
+                print("⚠️ النص قصير جداً، سيتم تخطيه.")
+                continue
+
+            prompt = f"""
+            أنت محرر صحفي محترف في وكالة سطور الإخبارية.
+            أعد صياغة هذا الخبر بشكل حصري:
+            1. عنوان رئيسي جذاب ومختصر في السطر الأول.
+            2. السطر الثاني يبدأ بـ "سطور الإخبارية / بغداد" أو مكان الحدث.
+            3. تفاصيل الخبر بأسلوب رصين.
+            4. لا تضع أي روابط أو تشير للمصدر الأصلي.
+            
+            النص الخام:
+            {raw_text[:4000]}
+            """
+            
+            try:
+                print("🧠 جاري التحرير بالذكاء الاصطناعي...")
+                edited_news = model.generate_content(prompt).text
                 
-        except Exception as e:
-            print(f"❌ خطأ في الذكاء الاصطناعي: {e}")
+                parts = edited_news.strip().split('\n', 1)
+                title = parts[0].replace('*', '').strip()
+                content = parts[1].strip() if len(parts) > 1 else edited_news
+
+                payload = {
+                    "api_key": SECRET_KEY,
+                    "title": title,
+                    "content": content,
+                    "category_id": cat_id,
+                    "image_url": image_url, # إرسال الصورة الحقيقية للخبر
+                    "original_url": url # إرسال الرابط للذاكرة
+                }
+                
+                pub_response = requests.post(SITE_API_URL, json=payload)
+                resp_json = pub_response.json()
+                
+                if pub_response.status_code == 201:
+                    print(f"✅ تم النشر: {title}")
+                elif pub_response.status_code == 200 and resp_json.get("status") == "ignored":
+                    print(f"⏭️ تم التخطي (الخبر منشور مسبقاً)")
+                else:
+                    print(f"❌ خطأ النشر: {pub_response.text}")
+                    
+            except Exception as e:
+                print(f"❌ خطأ في المعالجة: {e}")
 
 if __name__ == "__main__":
     process_and_publish()
