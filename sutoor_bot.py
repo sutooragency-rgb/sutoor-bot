@@ -2,7 +2,7 @@ import os
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-import google.generativeai as genai
+from google import genai
 
 API_KEY_GEMINI = os.environ.get("GEMINI_API_KEY")
 SECRET_KEY = os.environ.get("SUTOOR_SECRET")
@@ -10,14 +10,14 @@ SECRET_KEY = os.environ.get("SUTOOR_SECRET")
 SITE_API_URL = "https://sutoor.news/news_api/auto_publish.php"
 SOURCES_URL = f"https://sutoor.news/news_api/get_bot_sources.php?key={SECRET_KEY}"
 
-genai.configure(api_key=API_KEY_GEMINI)
-model = genai.GenerativeModel('gemini-1.5-flash')
+# تفعيل الذكاء الاصطناعي بالمكتبة الجديدة لجوجل
+client = genai.Client(api_key=API_KEY_GEMINI)
 
 def get_latest_links(category_url):
     """صيد الروابط من صفحة القسم"""
     print(f"🔍 جاري مسح صفحة القسم: {category_url}")
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(category_url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.content, 'html.parser')
         base_domain = urlparse(category_url).netloc
@@ -30,7 +30,7 @@ def get_latest_links(category_url):
             if parsed.netloc == base_domain and len(parsed.path) > 15:
                 if full_url not in links:
                     links.append(full_url)
-        return links[:4] # سحب أحدث 4 روابط فقط لتجنب الضغط
+        return links[:4] # سحب أحدث 4 روابط
     except Exception as e:
         print(f"❌ خطأ في مسح القسم: {e}")
         return []
@@ -38,17 +38,15 @@ def get_latest_links(category_url):
 def extract_news_content(article_url):
     """سحب النص والصورة من الخبر"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(article_url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # استخراج الصورة الرسمية للخبر
         image_url = "https://sutoor.news/assets/images/default.jpg"
         og_image = soup.find("meta", property="og:image")
         if og_image and og_image.get("content"):
             image_url = og_image["content"]
 
-        # استخراج النص
         paragraphs = soup.find_all('p')
         text = " ".join([p.get_text() for p in paragraphs])
         
@@ -69,6 +67,11 @@ def process_and_publish():
         category_url = src['source_url']
         cat_id = src['category_id']
         
+        # تخطي روابط فيسبوك تلقائياً
+        if "facebook.com" in category_url:
+            print(f"⚠️ جاري تخطي رابط فيسبوك (غير مدعوم برمجياً): {category_url}")
+            continue
+            
         # 1. جلب الروابط من القسم
         article_links = get_latest_links(category_url)
         
@@ -96,7 +99,12 @@ def process_and_publish():
             
             try:
                 print("🧠 جاري التحرير بالذكاء الاصطناعي...")
-                edited_news = model.generate_content(prompt).text
+                # استخدام الموديل الجديد
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                )
+                edited_news = response.text
                 
                 parts = edited_news.strip().split('\n', 1)
                 title = parts[0].replace('*', '').strip()
@@ -107,17 +115,20 @@ def process_and_publish():
                     "title": title,
                     "content": content,
                     "category_id": cat_id,
-                    "image_url": image_url, # إرسال الصورة الحقيقية للخبر
-                    "original_url": url # إرسال الرابط للذاكرة
+                    "image_url": image_url, 
+                    "original_url": url 
                 }
                 
                 pub_response = requests.post(SITE_API_URL, json=payload)
-                resp_json = pub_response.json()
+                try:
+                    resp_json = pub_response.json()
+                except:
+                    resp_json = {}
                 
                 if pub_response.status_code == 201:
-                    print(f"✅ تم النشر: {title}")
+                    print(f"✅ تم النشر بنجاح: {title}")
                 elif pub_response.status_code == 200 and resp_json.get("status") == "ignored":
-                    print(f"⏭️ تم التخطي (الخبر منشور مسبقاً)")
+                    print(f"⏭️ تم التخطي (الخبر منشور مسبقاً في وكالتك)")
                 else:
                     print(f"❌ خطأ النشر: {pub_response.text}")
                     
