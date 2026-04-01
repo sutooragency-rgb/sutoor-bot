@@ -1,0 +1,29 @@
+name: Sutoor Auto News Bot
+
+on:
+  schedule:
+    - cron: '0 */2 * * *' # النظام سيعمل تلقائياً كل ساعتين
+  workflow_dispatch: # يتيح لك زراً لتشغيل النظام يدوياً متى شئت
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: جلب ملفات المستودع
+        uses: actions/checkout@v3
+
+      - name: تجهيز بيئة بايثون
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: تثبيت المكتبات المطلوبة
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 google-generativeai
+
+      - name: تشغيل المحرر الآلي لوكالة سطور
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SUTOOR_SECRET: ${{ secrets.SUTOOR_SECRET }}
+        run: python sutoor_bot.py
