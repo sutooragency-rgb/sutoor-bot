@@ -5,7 +5,7 @@ import logging
 import os
 import re
 from urllib.parse import urljoin
-import cloudscraper # السلاح السري لاختراق حماية المواقع
+import cloudscraper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -27,7 +27,6 @@ def save_sent_link(link):
         f.write(link + "\n")
 
 def send_skip_signal(source_url):
-    """إرسال إشارة للداشبورد في حالة عدم وجود أخبار جديدة"""
     try:
         payload = {"api_key": SECRET_KEY, "action": "skip", "source_url": source_url}
         requests.post(PUBLISH_URL, json=payload, timeout=10)
@@ -46,60 +45,61 @@ def extract_high_quality_image(soup, base_url):
 
 def process_source(source_url, category_id, sent_links):
     logging.info(f"🔍 فحص المصدر: {source_url}")
-    
-    # 🌟 تشغيل المتصفح الشبح (Cloudscraper) لتخطي الحظر
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
     published_count = 0 
     
     try:
-        req = scraper.get(source_url, timeout=25)
-        
         # ==========================================
-        # 🌟 نظام السوشيال ميديا (RSS - فيسبوك ويوتيوب وتليكرام)
+        # 🌟 نظام السوشيال ميديا (RSS - نظام الوسيط لتخطي الحظر)
         # ==========================================
         if "rss" in source_url.lower() or "youtube.com/feeds" in source_url.lower() or source_url.endswith('.xml'):
-            # استخدام محلل قوي للبيانات
-            soup = BeautifulSoup(req.content, 'xml')
-            if not soup.find('item') and not soup.find('entry'):
-                soup = BeautifulSoup(req.content, 'html.parser')
-
-            items = soup.find_all('item') or soup.find_all('entry')
             
+            # إرسال الرابط عبر واجهة rss2json لكسر حماية Cloudflare تماماً
+            api_proxy_url = f"https://api.rss2json.com/v1/api.json?rss_url={source_url}"
+            res = requests.get(api_proxy_url, timeout=25)
+            
+            try:
+                data = res.json()
+            except:
+                logging.error("⚠️ فشل في قراءة البيانات من الوسيط.")
+                send_skip_signal(source_url)
+                return
+
+            if data.get('status') != 'ok':
+                logging.error(f"⚠️ الرابط محمي بشدة أو غير صالح: {source_url}")
+                send_skip_signal(source_url)
+                return
+            
+            items = data.get('items', [])
             if not items:
-                logging.error(f"⚠️ الرابط لا يحتوي بيانات، قد يكون الحظر قوياً أو الرابط فارغ.")
                 send_skip_signal(source_url)
                 return
 
             for item in items[:5]:
-                # استخراج الرابط
-                link_tag = item.find('link')
-                link = ""
-                if link_tag:
-                    if link_tag.name == 'link' and link_tag.get('href'):
-                        link = link_tag.get('href')
-                    else:
-                        link = link_tag.text.strip()
-                
+                link = item.get('link', '')
                 if not link or link in sent_links: continue
                 
-                # استخراج العنوان
-                title_tag = item.find('title')
-                title = title_tag.text.strip() if title_tag else "خبر عاجل"
+                title = item.get('title', 'خبر عاجل')
+                raw_desc = item.get('content') or item.get('description', '')
                 
-                # استخراج الوصف
-                desc_tag = item.find('description') or item.find('content')
-                raw_desc = desc_tag.text if desc_tag else ""
                 desc_soup = BeautifulSoup(raw_desc, 'html.parser')
                 content = desc_soup.get_text(separator='\n\n', strip=True)
                 
                 if not content or len(content) < 10: 
                     content = title
                 
-                image_url = ""
+                image_url = item.get('thumbnail', '')
+                enclosure = item.get('enclosure', {})
+                if not image_url and isinstance(enclosure, dict):
+                    image_url = enclosure.get('link', '')
+                
+                if not image_url:
+                    img_tag = desc_soup.find('img')
+                    if img_tag: image_url = img_tag.get('src', '')
+
                 is_youtube = False
                 video_id = ""
                 
-                # التحقق إذا كان الرابط يوتيوب
                 if "youtube.com/watch" in link or "youtu.be/" in link:
                     match = re.search(r"(v=|youtu\.be/)([a-zA-Z0-9_-]+)", link)
                     if match: video_id, is_youtube = match.group(2), True
@@ -108,10 +108,6 @@ def process_source(source_url, category_id, sent_links):
                     iframe_html = f'<div style="text-align:center; margin-bottom: 20px;"><iframe width="100%" height="450" src="https://www.youtube.com/embed/{video_id}" frameborder="0" allowfullscreen></iframe></div>'
                     content = iframe_html + "\n\n" + content
                     image_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
-                else:
-                    media_tag = item.find('media:content') or item.find('enclosure') or item.find('media:thumbnail')
-                    if media_tag and media_tag.get('url'): image_url = media_tag.get('url')
-                    elif desc_soup.find('img'): image_url = desc_soup.find('img').get('src')
                 
                 payload = {"api_key": SECRET_KEY, "action": "publish", "source_url": source_url, "title": title, "content": content, "image_url": image_url, "category_id": category_id}
                 post_req = requests.post(PUBLISH_URL, json=payload, timeout=15)
@@ -120,15 +116,16 @@ def process_source(source_url, category_id, sent_links):
                     published_count += 1
                     save_sent_link(link)
                     sent_links.add(link)
-                    logging.info(f"✅ تم سحب ونشر خبر السوشيال ميديا/الفيديو: {title[:30]}")
+                    logging.info(f"✅ تم سحب ونشر خبر السوشيال ميديا: {title[:30]}")
                 time.sleep(5)
                 
             if published_count == 0: send_skip_signal(source_url)
             return 
-        
+
         # ==========================================
         # 🌐 نظام المواقع الحكومية العادية
         # ==========================================
+        req = scraper.get(source_url, timeout=25)
         soup = BeautifulSoup(req.content, 'html.parser')
         article_links = []
         for a in soup.find_all('a', href=True):
@@ -180,7 +177,7 @@ def process_source(source_url, category_id, sent_links):
         send_skip_signal(source_url)
 
 def run_sutoor_engine():
-    logging.info("🚀 تشغيل محرك وكالة سطور (V7 - كاسر حماية السوشيال ميديا واليوتيوب)...")
+    logging.info("🚀 تشغيل محرك وكالة سطور (V8 - نظام الوسيط لتخطي حظر الفيس بوك)...")
     try:
         sources_req = requests.get(GET_SOURCES_URL, timeout=15)
         if sources_req.status_code == 200:
