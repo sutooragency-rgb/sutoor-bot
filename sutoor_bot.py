@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 # ================= الإعدادات المركزية لوكالة سطور =================
 # ⚠️ تنبيه هام: استبدل sutoor.com بالدومين الحقيقي للوكالة الخاصة بك
-BASE_DOMAIN = "https://sutoor.com" 
+BASE_DOMAIN = "https://sutoor.news/" 
 
 # المسارات الجديدة بعد وضع الملفات داخل مجلد news_api
 GET_SOURCES_URL = f"{BASE_DOMAIN}/news_api/get_bot_sources.php?key=Sutoor_Super_Secret_Key_2026"
