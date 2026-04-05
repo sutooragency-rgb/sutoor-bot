@@ -3,7 +3,9 @@ from bs4 import BeautifulSoup
 import time
 import logging
 import os
+import re
 from urllib.parse import urljoin
+import cloudscraper # السلاح السري لاختراق حماية RSS.app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -22,78 +24,92 @@ def save_sent_link(link):
     with open(SENT_FILE, "a", encoding="utf-8") as f:
         f.write(link + "\n")
 
-def send_skip_signal(source_url, headers):
-    """إرسال إشارة للداشبورد لزيادة عداد التخطي/الخطأ"""
+def send_skip_signal(source_url):
     try:
         payload = {"api_key": SECRET_KEY, "action": "skip", "source_url": source_url}
-        requests.post(PUBLISH_URL, json=payload, headers=headers, timeout=10)
+        requests.post(PUBLISH_URL, json=payload, timeout=10)
     except: pass
 
 def extract_high_quality_image(soup, base_url):
     og_image = soup.find("meta", property="og:image")
     if og_image and og_image.get("content"): return urljoin(base_url, og_image.get("content"))
-    twitter_image = soup.find("meta", attrs={"name": "twitter:image"})
-    if twitter_image and twitter_image.get("content"): return urljoin(base_url, twitter_image.get("content"))
     for img in soup.find_all('img'):
         src = img.get('data-src') or img.get('src') 
         if src:
             src_lower = src.lower()
-            if not any(word in src_lower for word in ['logo', 'icon', 'avatar', 'banner', 'footer', 'bg', 'header']):
-                return urljoin(base_url, src)
+            if not any(word in src_lower for word in ['logo', 'icon', 'avatar', 'banner']): return urljoin(base_url, src)
     return ""
 
 def process_source(source_url, category_id, sent_links):
     logging.info(f"🔍 فحص المصدر: {source_url}")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
-    published_count = 0 # تتبع عدد المنشورات الناجحة
+    
+    # 🌟 تشغيل المتصفح الشبح (Cloudscraper) لتخطي الحظر
+    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+    published_count = 0 
     
     try:
-        req = requests.get(source_url, headers=headers, timeout=20)
+        req = scraper.get(source_url, timeout=25) # استخدام السكرابر بدلاً من requests العادي
         
         # ==========================================
-        # 🌟 نظام الفيس بوك (RSS)
+        # 🌟 نظام السوشيال ميديا (RSS)
         # ==========================================
-        if "rss" in source_url.lower() or source_url.endswith('.xml'):
+        if "rss" in source_url.lower() or "youtube.com/feeds" in source_url.lower() or source_url.endswith('.xml'):
             soup = BeautifulSoup(req.content, 'html.parser')
-            items = soup.find_all('item')
+            items = soup.find_all('item') or soup.find_all('entry')
             
             if not items:
-                logging.info("⚠️ لم يتم العثور على منشورات في هذا الـ RSS.")
-                send_skip_signal(source_url, headers)
+                logging.error(f"⚠️ الرابط لا يحتوي بيانات، قد يكون الحظر قوياً أو الرابط فارغ. الكود: {req.status_code}")
+                send_skip_signal(source_url)
                 return
 
             for item in items[:5]:
                 link_tag = item.find('link')
-                link = link_tag.text.strip() if link_tag else ""
+                link = link_tag.get('href') if link_tag and link_tag.has_attr('href') else (link_tag.text.strip() if link_tag else "")
+                
                 if not link or link in sent_links: continue
                 
                 title_tag = item.find('title')
-                title = title_tag.text.strip() if title_tag else "خبر جديد"
+                title = title_tag.text.strip() if title_tag else "خبر عاجل"
                 
-                desc_tag = item.find('description')
+                desc_tag = item.find('description') or item.find('content')
                 raw_desc = desc_tag.text if desc_tag else ""
                 desc_soup = BeautifulSoup(raw_desc, 'html.parser')
                 content = desc_soup.get_text(separator='\n\n', strip=True)
                 
-                if not content or len(content) < 30: continue
+                # إذا كان الوصف فارغاً في الفيس بوك، اجعل العنوان هو النص
+                if not content or len(content) < 10: 
+                    content = title
                 
                 image_url = ""
-                media_tag = item.find('media:content') or item.find('enclosure')
-                if media_tag and media_tag.get('url'): image_url = media_tag.get('url')
-                elif desc_soup.find('img'): image_url = desc_soup.find('img').get('src')
+                is_youtube = False
+                video_id = ""
                 
-                # إضافة source_url و action للـ Payload
+                if "youtube.com/watch" in link or "youtu.be/" in link:
+                    match = re.search(r"(v=|youtu\.be/)([a-zA-Z0-9_-]+)", link)
+                    if match: video_id, is_youtube = match.group(2), True
+                
+                if is_youtube:
+                    iframe_html = f'<div style="text-align:center; margin-bottom: 20px;"><iframe width="100%" height="450" src="https://www.youtube.com/embed/{video_id}" frameborder="0" allowfullscreen></iframe></div>'
+                    content = iframe_html + "\n\n" + content
+                    image_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+                else:
+                    media_tag = item.find('media:content') or item.find('enclosure')
+                    if media_tag and media_tag.get('url'): image_url = media_tag.get('url')
+                    elif desc_soup.find('img'): image_url = desc_soup.find('img').get('src')
+                
                 payload = {"api_key": SECRET_KEY, "action": "publish", "source_url": source_url, "title": title, "content": content, "image_url": image_url, "category_id": category_id}
-                post_req = requests.post(PUBLISH_URL, json=payload, headers=headers, timeout=15)
+                
+                # نرسل الخبر لوكالتك باستخدام requests السريع العادي
+                post_req = requests.post(PUBLISH_URL, json=payload, timeout=15)
                 
                 if post_req.status_code == 201:
                     published_count += 1
                     save_sent_link(link)
                     sent_links.add(link)
+                    logging.info(f"✅ تم سحب ونشر خبر السوشيال ميديا: {title[:30]}")
                 time.sleep(5)
                 
-            # إذا انتهى البحث ولم ينشر شيئاً جديداً، أرسل إشارة تخطي
-            if published_count == 0: send_skip_signal(source_url, headers)
+            if published_count == 0: send_skip_signal(source_url)
             return 
         
         # ==========================================
@@ -104,20 +120,19 @@ def process_source(source_url, category_id, sent_links):
         for a in soup.find_all('a', href=True):
             href = a['href']
             text = a.text.strip()
-            if any(kw in href.lower() for kw in ['news', 'article', 'details', 'view', 'read', 'item', 'id=']) or any(kw in text for kw in ["اكمل القراءة", "التفاصيل", "المزيد", "قراءة", "خبر"]):
+            if any(kw in href.lower() for kw in ['news', 'article', 'details', 'view', 'read', 'item']) or any(kw in text for kw in ["اكمل القراءة", "التفاصيل", "المزيد", "قراءة"]):
                 full_link = urljoin(source_url, href)
                 if full_link not in article_links and full_link != source_url and len(full_link) > len(source_url) + 5:
                     article_links.append(full_link)
         
         if not article_links:
-            logging.info("⚠️ لم يتم العثور على روابط أخبار.")
-            send_skip_signal(source_url, headers)
+            send_skip_signal(source_url)
             return
 
         for link in article_links[:5]:
             if link in sent_links: continue 
                 
-            news_req = requests.get(link, headers=headers, timeout=20)
+            news_req = scraper.get(link, timeout=20)
             news_soup = BeautifulSoup(news_req.content, 'html.parser')
             
             title_tag = news_soup.find('h1') or news_soup.find('h2') or news_soup.find('h3')
@@ -136,7 +151,7 @@ def process_source(source_url, category_id, sent_links):
             image_url = extract_high_quality_image(news_soup, link)
             
             payload = {"api_key": SECRET_KEY, "action": "publish", "source_url": source_url, "title": title, "content": content, "image_url": image_url, "category_id": category_id}
-            post_req = requests.post(PUBLISH_URL, json=payload, headers=headers, timeout=15)
+            post_req = requests.post(PUBLISH_URL, json=payload, timeout=15)
             
             if post_req.status_code == 201:
                 published_count += 1
@@ -144,18 +159,16 @@ def process_source(source_url, category_id, sent_links):
                 sent_links.add(link)
             time.sleep(5) 
             
-        # إذا انتهى فحص الموقع ولم يتم نشر شيء، أرسل إشارة تخطي
-        if published_count == 0: send_skip_signal(source_url, headers)
+        if published_count == 0: send_skip_signal(source_url)
             
     except Exception as e:
         logging.error(f"⚠️ خطأ: {e}")
-        send_skip_signal(source_url, headers)
+        send_skip_signal(source_url)
 
 def run_sutoor_engine():
-    logging.info("🚀 تشغيل محرك وكالة سطور (V5 - مع نظام العدادات الذكي)...")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
+    logging.info("🚀 تشغيل محرك وكالة سطور (V7 - كاسر حماية السوشيال ميديا)...")
     try:
-        sources_req = requests.get(GET_SOURCES_URL, headers=headers, timeout=15)
+        sources_req = requests.get(GET_SOURCES_URL, timeout=15)
         if sources_req.status_code == 200:
             sources = sources_req.json()
             if not sources: return
