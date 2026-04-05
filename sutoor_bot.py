@@ -5,15 +5,17 @@ import logging
 import os
 import re
 from urllib.parse import urljoin
-import cloudscraper # السلاح السري لاختراق حماية RSS.app
+import cloudscraper # السلاح السري لاختراق حماية المواقع
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
+# ================= الإعدادات المركزية لوكالة سطور =================
 BASE_DOMAIN = "https://sutoor.news" 
 GET_SOURCES_URL = f"{BASE_DOMAIN}/news_api/get_bot_sources.php?key=Sutoor_Super_Secret_Key_2026"
 PUBLISH_URL = f"{BASE_DOMAIN}/news_api/auto_publish.php"
 SECRET_KEY = "Sutoor_Super_Secret_Key_2026"
 SENT_FILE = "sent_news.txt"
+# ==================================================================
 
 def load_sent_links():
     if not os.path.exists(SENT_FILE): return set()
@@ -25,6 +27,7 @@ def save_sent_link(link):
         f.write(link + "\n")
 
 def send_skip_signal(source_url):
+    """إرسال إشارة للداشبورد في حالة عدم وجود أخبار جديدة"""
     try:
         payload = {"api_key": SECRET_KEY, "action": "skip", "source_url": source_url}
         requests.post(PUBLISH_URL, json=payload, timeout=10)
@@ -37,7 +40,8 @@ def extract_high_quality_image(soup, base_url):
         src = img.get('data-src') or img.get('src') 
         if src:
             src_lower = src.lower()
-            if not any(word in src_lower for word in ['logo', 'icon', 'avatar', 'banner']): return urljoin(base_url, src)
+            if not any(word in src_lower for word in ['logo', 'icon', 'avatar', 'banner', 'footer', 'bg']): 
+                return urljoin(base_url, src)
     return ""
 
 def process_source(source_url, category_id, sent_links):
@@ -48,35 +52,46 @@ def process_source(source_url, category_id, sent_links):
     published_count = 0 
     
     try:
-        req = scraper.get(source_url, timeout=25) # استخدام السكرابر بدلاً من requests العادي
+        req = scraper.get(source_url, timeout=25)
         
         # ==========================================
-        # 🌟 نظام السوشيال ميديا (RSS)
+        # 🌟 نظام السوشيال ميديا (RSS - فيسبوك ويوتيوب وتليكرام)
         # ==========================================
         if "rss" in source_url.lower() or "youtube.com/feeds" in source_url.lower() or source_url.endswith('.xml'):
-            soup = BeautifulSoup(req.content, 'html.parser')
+            # استخدام محلل قوي للبيانات
+            soup = BeautifulSoup(req.content, 'xml')
+            if not soup.find('item') and not soup.find('entry'):
+                soup = BeautifulSoup(req.content, 'html.parser')
+
             items = soup.find_all('item') or soup.find_all('entry')
             
             if not items:
-                logging.error(f"⚠️ الرابط لا يحتوي بيانات، قد يكون الحظر قوياً أو الرابط فارغ. الكود: {req.status_code}")
+                logging.error(f"⚠️ الرابط لا يحتوي بيانات، قد يكون الحظر قوياً أو الرابط فارغ.")
                 send_skip_signal(source_url)
                 return
 
             for item in items[:5]:
+                # استخراج الرابط
                 link_tag = item.find('link')
-                link = link_tag.get('href') if link_tag and link_tag.has_attr('href') else (link_tag.text.strip() if link_tag else "")
+                link = ""
+                if link_tag:
+                    if link_tag.name == 'link' and link_tag.get('href'):
+                        link = link_tag.get('href')
+                    else:
+                        link = link_tag.text.strip()
                 
                 if not link or link in sent_links: continue
                 
+                # استخراج العنوان
                 title_tag = item.find('title')
                 title = title_tag.text.strip() if title_tag else "خبر عاجل"
                 
+                # استخراج الوصف
                 desc_tag = item.find('description') or item.find('content')
                 raw_desc = desc_tag.text if desc_tag else ""
                 desc_soup = BeautifulSoup(raw_desc, 'html.parser')
                 content = desc_soup.get_text(separator='\n\n', strip=True)
                 
-                # إذا كان الوصف فارغاً في الفيس بوك، اجعل العنوان هو النص
                 if not content or len(content) < 10: 
                     content = title
                 
@@ -84,6 +99,7 @@ def process_source(source_url, category_id, sent_links):
                 is_youtube = False
                 video_id = ""
                 
+                # التحقق إذا كان الرابط يوتيوب
                 if "youtube.com/watch" in link or "youtu.be/" in link:
                     match = re.search(r"(v=|youtu\.be/)([a-zA-Z0-9_-]+)", link)
                     if match: video_id, is_youtube = match.group(2), True
@@ -93,27 +109,25 @@ def process_source(source_url, category_id, sent_links):
                     content = iframe_html + "\n\n" + content
                     image_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
                 else:
-                    media_tag = item.find('media:content') or item.find('enclosure')
+                    media_tag = item.find('media:content') or item.find('enclosure') or item.find('media:thumbnail')
                     if media_tag and media_tag.get('url'): image_url = media_tag.get('url')
                     elif desc_soup.find('img'): image_url = desc_soup.find('img').get('src')
                 
                 payload = {"api_key": SECRET_KEY, "action": "publish", "source_url": source_url, "title": title, "content": content, "image_url": image_url, "category_id": category_id}
-                
-                # نرسل الخبر لوكالتك باستخدام requests السريع العادي
                 post_req = requests.post(PUBLISH_URL, json=payload, timeout=15)
                 
                 if post_req.status_code == 201:
                     published_count += 1
                     save_sent_link(link)
                     sent_links.add(link)
-                    logging.info(f"✅ تم سحب ونشر خبر السوشيال ميديا: {title[:30]}")
+                    logging.info(f"✅ تم سحب ونشر خبر السوشيال ميديا/الفيديو: {title[:30]}")
                 time.sleep(5)
                 
             if published_count == 0: send_skip_signal(source_url)
             return 
         
         # ==========================================
-        # 🌐 نظام المواقع العادية
+        # 🌐 نظام المواقع الحكومية العادية
         # ==========================================
         soup = BeautifulSoup(req.content, 'html.parser')
         article_links = []
@@ -166,7 +180,7 @@ def process_source(source_url, category_id, sent_links):
         send_skip_signal(source_url)
 
 def run_sutoor_engine():
-    logging.info("🚀 تشغيل محرك وكالة سطور (V7 - كاسر حماية السوشيال ميديا)...")
+    logging.info("🚀 تشغيل محرك وكالة سطور (V7 - كاسر حماية السوشيال ميديا واليوتيوب)...")
     try:
         sources_req = requests.get(GET_SOURCES_URL, timeout=15)
         if sources_req.status_code == 200:
