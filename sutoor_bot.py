@@ -1,165 +1,146 @@
-import os
 import requests
-import time # مكتبة الوقت لعمل استراحة للبوت
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-from google import genai
+import time
+import logging
+import os
+from urllib.parse import urljoin
 
-API_KEY_GEMINI = os.environ.get("GEMINI_API_KEY")
-SECRET_KEY = os.environ.get("SUTOOR_SECRET")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
-SITE_API_URL = "https://sutoor.news/news_api/auto_publish.php"
-SOURCES_URL = f"https://sutoor.news/news_api/get_bot_sources.php?key={SECRET_KEY}"
+# ================= الإعدادات المركزية لوكالة سطور =================
+# ⚠️ استبدل هذا الرابط بالدومين الحقيقي لوكالة سطور الخاصة بك
+BASE_DOMAIN = "https://sutoor.com" 
 
-client = genai.Client(api_key=API_KEY_GEMINI)
+# روابط الاتصال بملفات الـ PHP الموجودة في استضافة هوستنجر
+GET_SOURCES_URL = f"{BASE_DOMAIN}/get_bot_sources.php?key=Sutoor_Super_Secret_Key_2026"
+PUBLISH_URL = f"{BASE_DOMAIN}/auto_publish.php"
+SECRET_KEY = "Sutoor_Super_Secret_Key_2026"
+# ==================================================================
 
-def get_latest_links(category_url):
-    print(f"🔍 جاري مسح صفحة القسم: {category_url}")
+# ملف الأرشيف (لضمان عدم نشر الخبر مرتين)
+SENT_FILE = "sent_news.txt"
+
+def load_sent_links():
+    if not os.path.exists(SENT_FILE): return set()
+    with open(SENT_FILE, "r", encoding="utf-8") as f:
+        return set(line.strip() for line in f.readlines())
+
+def save_sent_link(link):
+    with open(SENT_FILE, "a", encoding="utf-8") as f:
+        f.write(link + "\n")
+
+def extract_high_quality_image(soup, base_url):
+    """
+    قناص الصور: يبحث عن الصورة الرسمية للخبر بأعلى جودة.
+    يتجاوز الحماية ويتجاوز التحميل البطيء (Lazy Load) العشوائي في المواقع.
+    """
+    # 1. المحاولة الذهبية: صورة الـ Open Graph (التي تظهر عند مشاركة الرابط في فيسبوك)
+    og_image = soup.find("meta", property="og:image")
+    if og_image and og_image.get("content"):
+        return urljoin(base_url, og_image.get("content"))
+    
+    # 2. المحاولة الفضية: صورة تويتر الرسمية للخبر
+    twitter_image = soup.find("meta", attrs={"name": "twitter:image"})
+    if twitter_image and twitter_image.get("content"):
+        return urljoin(base_url, twitter_image.get("content"))
+    
+    # 3. المحاولة البرونزية: البحث اليدوي في المقال وتجاوز اللوجو والأيقونات
+    for img in soup.find_all('img'):
+        # استخدام data-src لاصطياد الصور المخفية بـ Lazy Load
+        src = img.get('data-src') or img.get('src') 
+        if src:
+            src_lower = src.lower()
+            if not any(word in src_lower for word in ['logo', 'icon', 'avatar', 'banner', 'footer', 'bg']):
+                return urljoin(base_url, src)
+    return ""
+
+def process_source(source_url, category_id, sent_links):
+    logging.info(f"🔍 فحص المصدر: {source_url}")
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        if "t.me" in category_url:
-            if "/s/" not in category_url:
-                category_url = category_url.replace("t.me/", "t.me/s/")
-            response = requests.get(category_url, headers=headers, timeout=15)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            links = []
-            for a_tag in soup.find_all('a', class_='tgme_widget_message_date'):
-                full_url = a_tag.get('href')
-                if full_url and full_url not in links:
-                    links.append(full_url)
-            return links[-3:] # سحب أحدث 3 منشورات لتقليل الضغط على جوجل
-
-        response = requests.get(category_url, headers=headers, timeout=15)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        base_domain = urlparse(category_url).netloc
-        links = []
-        for a_tag in soup.find_all('a', href=True):
-            full_url = urljoin(category_url, a_tag['href'])
-            parsed = urlparse(full_url)
-            if parsed.netloc == base_domain and len(parsed.path) > 15:
-                if full_url not in links:
-                    links.append(full_url)
-        return links[:3]
+        req = requests.get(source_url, headers=headers, timeout=20)
+        soup = BeautifulSoup(req.content, 'html.parser')
+        
+        # استخراج روابط الأخبار الفردية (الغوص العميق في بطاقات الأخبار)
+        article_links = []
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            text = a.text.strip()
+            # فلترة الروابط لاختيار تفاصيل الأخبار الحقيقية فقط
+            if any(kw in href.lower() for kw in ['news', 'article', 'details', 'view', 'read', 'item']) or "اكمل القراءة" in text or "التفاصيل" in text or "المزيد" in text:
+                full_link = urljoin(source_url, href)
+                if full_link not in article_links and full_link != source_url:
+                    article_links.append(full_link)
+        
+        # معالجة أحدث 5 أخبار فقط لتجنب الضغط على سيرفرات هوستنجر
+        for link in article_links[:5]:
+            if link in sent_links:
+                continue 
+                
+            logging.info(f"⏳ الدخول للخبر وتحليله: {link}")
+            news_req = requests.get(link, headers=headers, timeout=20)
+            news_soup = BeautifulSoup(news_req.content, 'html.parser')
+            
+            # --- استخراج العنوان ---
+            title_tag = news_soup.find('h1') or news_soup.find('h2')
+            if not title_tag: continue
+            title = title_tag.text.strip()
+            
+            # --- استخراج المحتوى ---
+            paragraphs = news_soup.find_all('p')
+            # نأخذ الفقرات التي تحتوي على نصوص طويلة نسبياً لتجنب الكلمات القصيرة
+            content = "\n\n".join([p.text.strip() for p in paragraphs if len(p.text.strip()) > 30])
+            if not content: continue
+                
+            # --- استخراج الصورة (عن طريق قناص الصور V2) ---
+            image_url = extract_high_quality_image(news_soup, link)
+            
+            # --- الإرسال إلى ملف الاستقبال في وكالة سطور ---
+            payload = {
+                "api_key": SECRET_KEY,
+                "title": title,
+                "content": content,
+                "image_url": image_url,
+                "category_id": category_id
+            }
+            
+            logging.info(f"📤 إرسال الخبر: {title[:40]}...")
+            post_req = requests.post(PUBLISH_URL, json=payload, timeout=15)
+            
+            if post_req.status_code == 201:
+                logging.info("✅ تم النشر في وكالة سطور بنجاح (مع الصورة)!")
+                save_sent_link(link)
+                sent_links.add(link)
+            else:
+                logging.error(f"❌ فشل النشر. الكود: {post_req.status_code}")
+                
+            time.sleep(5) # استراحة بين كل خبر وآخر لتجنب حظر الآي بي
+            
     except Exception as e:
-        return []
+        logging.error(f"⚠️ خطأ في معالجة المصدر {source_url}: {e}")
 
-def extract_news_content(article_url):
+def run_sutoor_engine():
+    logging.info("🚀 تشغيل محرك وكالة سطور الذكي (النسخة الثانية V2)...")
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        if "t.me" in article_url:
-            if "?embed=1" not in article_url:
-                article_url += "?embed=1"
-            response = requests.get(article_url, headers=headers, timeout=15)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            text_div = soup.find("div", class_="tgme_widget_message_text")
-            text = text_div.get_text(separator=" ") if text_div else ""
-            image_url = ""
-            img_a = soup.find("a", class_="tgme_widget_message_photo_wrap")
-            if img_a and img_a.get("style") and "url(" in img_a["style"]:
-                image_url = img_a["style"].split("url('")[1].split("')")[0]
-            return text.strip(), image_url
-
-        response = requests.get(article_url, headers=headers, timeout=15)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        image_url = ""
-        og_image = soup.find("meta", property="og:image")
-        tw_image = soup.find("meta", attrs={"name": "twitter:image"})
-        if og_image and og_image.get("content"):
-            image_url = og_image["content"]
-        elif tw_image and tw_image.get("content"):
-            image_url = tw_image["content"]
+        # 1. الاتصال العكسي: جلب المواقع ديناميكياً من لوحة تحكم وكالة سطور
+        sources_req = requests.get(GET_SOURCES_URL, timeout=15)
+        if sources_req.status_code == 200:
+            sources = sources_req.json()
+            if not sources:
+                logging.info("⚠️ لم يتم العثور على أي مصادر مفعلة. يرجى إضافتها من لوحة تحكم الوكالة.")
+                return
+            
+            sent_links = load_sent_links()
+            
+            # 2. تشغيل عملية المعالجة لكل موقع مضاف
+            for source in sources:
+                process_source(source['source_url'], source['category_id'], sent_links)
         else:
-            first_img = soup.find("img")
-            if first_img and first_img.get("src"):
-                image_url = first_img["src"]
-
-        if image_url and not image_url.startswith("http"):
-            image_url = urljoin(article_url, image_url)
-
-        paragraphs = soup.find_all('p')
-        text = " ".join([p.get_text() for p in paragraphs])
-        return text.strip(), image_url
+            logging.error(f"❌ لا يمكن الاتصال بملف get_bot_sources.php. تأكد من الرابط. الكود: {sources_req.status_code}")
     except Exception as e:
-        return "", ""
-
-def process_and_publish():
-    print("🤖 الصياد الآلي بدأ العمل (مع فرامل الذكاء الاصطناعي لحماية الحساب)...")
-    try:
-        response = requests.get(SOURCES_URL)
-        sources = response.json()
-    except Exception as e:
-        print("❌ فشل الاتصال بقاعدة البيانات.")
-        return
-
-    for src in sources:
-        category_url = src['source_url']
-        cat_id = src['category_id']
-        
-        if "facebook.com" in category_url:
-            continue
-            
-        article_links = get_latest_links(category_url)
-        
-        for url in article_links:
-            print(f"📡 فحص الرابط: {url}")
-            raw_text, image_url = extract_news_content(url)
-            
-            if len(raw_text) < 40:
-                print("⚠️ النص قصير جداً، سيتم تخطيه.")
-                continue
-
-            prompt = f"""
-            أنت محرر صحفي محترف في وكالة سطور الإخبارية.
-            أعد صياغة هذا الخبر بشكل حصري:
-            1. عنوان رئيسي جذاب ومختصر في السطر الأول.
-            2. السطر الثاني يبدأ بـ "سطور الإخبارية / بغداد" أو مكان الحدث.
-            3. تفاصيل الخبر بأسلوب رصين.
-            4. لا تضع أي روابط أو تشير للمصدر الأصلي.
-            
-            النص الخام:
-            {raw_text[:4000]}
-            """
-            
-            try:
-                print("🧠 جاري التحرير بالذكاء الاصطناعي (يرجى الانتظار لتجنب الحظر)...")
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=prompt,
-                )
-                edited_news = response.text
-                
-                parts = edited_news.strip().split('\n', 1)
-                title = parts[0].replace('*', '').strip()
-                content = parts[1].strip() if len(parts) > 1 else edited_news
-
-                payload = {
-                    "api_key": SECRET_KEY,
-                    "title": title,
-                    "content": content,
-                    "category_id": cat_id,
-                    "image_url": image_url,
-                    "original_url": url 
-                }
-                
-                pub_response = requests.post(SITE_API_URL, json=payload)
-                try:
-                    resp_json = pub_response.json()
-                except:
-                    resp_json = {}
-                
-                if pub_response.status_code == 201:
-                    print(f"✅ تم النشر بنجاح (مع الصورة): {title}")
-                elif pub_response.status_code == 200 and resp_json.get("status") == "ignored":
-                    print(f"⏭️ تم التخطي (الخبر منشور مسبقاً)")
-                else:
-                    print(f"❌ خطأ النشر: {pub_response.text}")
-                
-                # إعطاء استراحة للبوت لمدة 10 ثوانٍ لحماية حسابك في جوجل من الحظر المؤقت
-                time.sleep(10)
-                
-            except Exception as e:
-                print(f"❌ خطأ في المعالجة: {e}")
-                time.sleep(10) # حتى لو حدث خطأ، نريحه قليلاً
+        logging.error(f"⚠️ فشل الاتصال العام بالاستضافة: {e}")
 
 if __name__ == "__main__":
-    process_and_publish()
+    # تشغيل مباشر لمرة واحدة (GitHub Actions سيتولى تكرار هذه العملية)
+    run_sutoor_engine()
