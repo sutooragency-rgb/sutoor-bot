@@ -8,11 +8,12 @@ from urllib.parse import urljoin
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 # ================= الإعدادات المركزية لوكالة سطور =================
-# ⚠️ استبدل هذا الرابط بالدومين الحقيقي لوكالة سطور الخاصة بك
-BASE_DOMAIN = "https://sutoor.news/" 
+# ⚠️ تنبيه هام: استبدل sutoor.com بالدومين الحقيقي للوكالة الخاصة بك
+BASE_DOMAIN = "https://sutoor.com" 
 
-GET_SOURCES_URL = f"{BASE_DOMAIN}/get_bot_sources.php?key=Sutoor_Super_Secret_Key_2026"
-PUBLISH_URL = f"{BASE_DOMAIN}/auto_publish.php"
+# المسارات الجديدة بعد وضع الملفات داخل مجلد news_api
+GET_SOURCES_URL = f"{BASE_DOMAIN}/news_api/get_bot_sources.php?key=Sutoor_Super_Secret_Key_2026"
+PUBLISH_URL = f"{BASE_DOMAIN}/news_api/auto_publish.php"
 SECRET_KEY = "Sutoor_Super_Secret_Key_2026"
 # ==================================================================
 
@@ -28,6 +29,7 @@ def save_sent_link(link):
         f.write(link + "\n")
 
 def extract_high_quality_image(soup, base_url):
+    """قناص الصور: يبحث عن الصورة الرسمية للخبر بأعلى جودة ويتجاوز اللوجوهات"""
     og_image = soup.find("meta", property="og:image")
     if og_image and og_image.get("content"): return urljoin(base_url, og_image.get("content"))
     
@@ -44,7 +46,8 @@ def extract_high_quality_image(soup, base_url):
 
 def process_source(source_url, category_id, sent_links):
     logging.info(f"🔍 فحص المصدر: {source_url}")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    # رأس متصفح حقيقي لتجاوز حماية هوستنجر
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     
     try:
         req = requests.get(source_url, headers=headers, timeout=20)
@@ -54,7 +57,7 @@ def process_source(source_url, category_id, sent_links):
         for a in soup.find_all('a', href=True):
             href = a['href']
             text = a.text.strip()
-            # توسيع دائرة اصطياد الروابط لتشمل مواقع مثل وزارة الداخلية
+            # صيد الروابط حتى من المواقع الحكومية العشوائية
             if any(kw in href.lower() for kw in ['news', 'article', 'details', 'view', 'read', 'item', 'id=']) or any(kw in text for kw in ["اكمل القراءة", "التفاصيل", "المزيد", "قراءة", "خبر"]):
                 full_link = urljoin(source_url, href)
                 if full_link not in article_links and full_link != source_url and len(full_link) > len(source_url) + 5:
@@ -71,28 +74,23 @@ def process_source(source_url, category_id, sent_links):
             news_req = requests.get(link, headers=headers, timeout=20)
             news_soup = BeautifulSoup(news_req.content, 'html.parser')
             
-            # --- استخراج العنوان (دعم شامل للمواقع المعقدة) ---
+            # --- استخراج العنوان ---
             title_tag = news_soup.find('h1') or news_soup.find('h2') or news_soup.find('h3')
-            if title_tag:
-                title = title_tag.text.strip()
-            else:
-                title = news_soup.title.text.strip() if news_soup.title else ""
-            
+            title = title_tag.text.strip() if title_tag else (news_soup.title.text.strip() if news_soup.title else "")
             if not title or len(title) < 10: continue
             
-            # --- استخراج المحتوى (دعم شامل) ---
+            # --- استخراج المحتوى ---
             paragraphs = news_soup.find_all('p')
             content = "\n\n".join([p.text.strip() for p in paragraphs if len(p.text.strip()) > 30])
             
             if not content:
-                # إذا لم يجد فقرات <p>، يبحث عن أكبر كتلة نصية في أي <div> (لحل مشكلة وزارة الداخلية)
+                # حل بديل للمواقع التي لا تستخدم <p>
                 divs = news_soup.find_all('div')
                 long_texts = [div.get_text(separator='\n', strip=True) for div in divs if len(div.get_text(strip=True)) > 150]
-                if long_texts:
-                    content = max(long_texts, key=len)
+                if long_texts: content = max(long_texts, key=len)
             
             if not content or len(content) < 50: 
-                logging.info(f"⏭️ تم تخطي الخبر لأن المحتوى قصير جداً أو فارغ: {link}")
+                logging.info(f"⏭️ تم تخطي الخبر لأن المحتوى قصير جداً: {link}")
                 continue
                 
             image_url = extract_high_quality_image(news_soup, link)
@@ -106,7 +104,7 @@ def process_source(source_url, category_id, sent_links):
             }
             
             logging.info(f"📤 إرسال الخبر: {title[:40]}...")
-            post_req = requests.post(PUBLISH_URL, json=payload, timeout=15)
+            post_req = requests.post(PUBLISH_URL, json=payload, headers=headers, timeout=15)
             
             if post_req.status_code == 201:
                 logging.info("✅ تم النشر في وكالة سطور بنجاح!")
@@ -121,19 +119,21 @@ def process_source(source_url, category_id, sent_links):
         logging.error(f"⚠️ خطأ في معالجة المصدر {source_url}: {e}")
 
 def run_sutoor_engine():
-    logging.info("🚀 تشغيل محرك وكالة سطور الذكي (النسخة الشاملة V3)...")
+    logging.info("🚀 تشغيل محرك وكالة سطور الذكي...")
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
     try:
-        sources_req = requests.get(GET_SOURCES_URL, timeout=15)
+        sources_req = requests.get(GET_SOURCES_URL, headers=headers, timeout=15)
         if sources_req.status_code == 200:
-            sources = sources_req.json()
-            if not sources:
-                logging.info("⚠️ لم يتم العثور على أي مصادر مفعلة.")
-                return
-            
-            sent_links = load_sent_links()
-            
-            for source in sources:
-                process_source(source['source_url'], source['category_id'], sent_links)
+            try:
+                sources = sources_req.json()
+                if not sources:
+                    logging.info("⚠️ لم يتم العثور على أي مصادر مفعلة.")
+                    return
+                sent_links = load_sent_links()
+                for source in sources:
+                    process_source(source['source_url'], source['category_id'], sent_links)
+            except Exception:
+                logging.error(f"❌ البيانات المستلمة غير صالحة. تأكد من أن الرابط يفتح بشكل صحيح ولا يوجد جدار حماية يمنع البوت. الرد:\n{sources_req.text[:200]}")
         else:
             logging.error(f"❌ لا يمكن الاتصال بـ get_bot_sources.php. الكود: {sources_req.status_code}")
     except Exception as e:
